@@ -186,7 +186,7 @@ func TestStreamSnapshotRetryAfterTurnEnded(t *testing.T) {
 			require.Greater(t, chat.RetryStateVersion, retryStateVersion)
 
 			// A client connects: the bootstrap sync in stream_subscribe.go.
-			loop := newStreamLoop(chat, db, slogtest.Make(t, nil), 0)
+			loop := newStreamLoop(chat, db, slogtest.Make(t, nil), 0, false)
 			events, _, changed, err := loop.syncDB(ctx)
 			require.NoError(t, err)
 			require.True(t, changed)
