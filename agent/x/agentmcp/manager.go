@@ -459,7 +459,7 @@ func (m *Manager) doReload(ctx context.Context, mcpConfigFiles []string) error {
 		return err
 	}
 
-	connected := m.connectAll(ctx, diff.toConnect)
+	connected, connectErrs := m.connectAll(ctx, diff.toConnect)
 
 	replaced, err := m.installServers(wanted, diff, connected, snap)
 	if err != nil {
@@ -483,7 +483,7 @@ func (m *Manager) doReload(ctx context.Context, mcpConfigFiles []string) error {
 	// blocking concurrent reads during network I/O, then notify the
 	// agentcontext manager when it changed so it re-resolves and
 	// re-pushes the KindMCPServer resources.
-	if m.refreshCatalog(ctx, wanted) {
+	if m.refreshCatalog(ctx, wanted, connectErrs) {
 		m.fireOnChange()
 	}
 	return nil
@@ -570,8 +570,9 @@ func (m *Manager) classifyServers(wanted map[string]ServerConfig) (*serverDiff, 
 }
 
 // connectAll runs connectServer in parallel for the given configs.
-// Failed connects are logged and skipped.
-func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []connectedServer {
+// Failed connects are logged and skipped; their errors are returned
+// keyed by server name.
+func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) ([]connectedServer, map[string]error) {
 	logger := m.logger.With(agentchat.Fields(ctx)...)
 
 	if hook := m.connectStartedHook; hook != nil {
@@ -579,8 +580,9 @@ func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []co
 	}
 
 	var (
-		mu        sync.Mutex
-		connected []connectedServer
+		mu          sync.Mutex
+		connected   []connectedServer
+		connectErrs = make(map[string]error)
 	)
 	var eg errgroup.Group
 	for _, cfg := range toConnect {
@@ -592,6 +594,9 @@ func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []co
 					slog.F("transport", cfg.Transport),
 					slog.Error(err),
 				)
+				mu.Lock()
+				connectErrs[cfg.Name] = err
+				mu.Unlock()
 				return nil // Don't fail the group.
 			}
 			mu.Lock()
@@ -603,7 +608,7 @@ func (m *Manager) connectAll(ctx context.Context, toConnect []ServerConfig) []co
 		})
 	}
 	_ = eg.Wait()
-	return connected
+	return connected, connectErrs
 }
 
 // installServers builds the new server map from diff.keep and the
@@ -734,9 +739,10 @@ func (m *Manager) CallTool(ctx context.Context, req workspacesdk.CallMCPToolRequ
 // declared server in wanted appears in the result: a server with a live
 // client contributes its listed tools (or its list error), and a server
 // that never connected appears as an unreadable entry so it surfaces in
-// the snapshot instead of vanishing. It returns whether the catalog
-// changed so the caller can fire the reload callback.
-func (m *Manager) refreshCatalog(ctx context.Context, wanted map[string]ServerConfig) bool {
+// the snapshot instead of vanishing, with its error from connectErrs
+// when present. Errors pass through redactErrorURLs. It reports whether
+// the catalog changed.
+func (m *Manager) refreshCatalog(ctx context.Context, wanted map[string]ServerConfig, connectErrs map[string]error) bool {
 	logger := m.logger.With(agentchat.Fields(ctx)...)
 
 	// Snapshot the connected servers under the read lock.
@@ -800,7 +806,9 @@ func (m *Manager) refreshCatalog(ctx context.Context, wanted map[string]ServerCo
 			st.Connected = true
 			st.Tools = res.tools
 		case ok:
-			st.Err = res.err.Error()
+			st.Err = redactErrorURLs(res.err)
+		case connectErrs[name] != nil:
+			st.Err = redactErrorURLs(connectErrs[name])
 		default:
 			st.Err = "failed to connect"
 		}
@@ -884,7 +892,7 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*mcp.Cli
 	// session or canceling ctx stops the subprocess.
 	tr, err := m.createTransport(ctx, cfg)
 	if err != nil {
-		return nil, xerrors.Errorf("create transport for %q: %w", cfg.Name, err)
+		return nil, xerrors.Errorf("create transport: %w", err)
 	}
 
 	c := mcp.NewClient(&mcp.Implementation{
@@ -897,7 +905,12 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*mcp.Cli
 
 	session, err := c.Connect(connectCtx, tr, nil)
 	if err != nil {
-		return nil, xerrors.Errorf("connect %q: %w", cfg.Name, err)
+		// A refused request closes the stream, and Connect can then
+		// report only the read side's EOF.
+		if refusal := headerRefusal(tr); refusal != nil {
+			err = refusal
+		}
+		return nil, xerrors.Errorf("connect: %w", err)
 	}
 
 	return session, nil
@@ -912,14 +925,22 @@ func (m *Manager) createTransport(ctx context.Context, cfg ServerConfig) (mcp.Tr
 		cmd.Dir = m.resolveWorkingDir()
 		return &mcp.CommandTransport{Command: cmd}, nil
 	case "http", "":
+		client, err := originPinnedHTTPClient(cfg.URL, cfg.Headers)
+		if err != nil {
+			return nil, err
+		}
 		return &mcp.StreamableClientTransport{
 			Endpoint:   cfg.URL,
-			HTTPClient: httpClientWithHeaders(cfg.Headers),
+			HTTPClient: client,
 		}, nil
 	case "sse":
+		client, err := originPinnedHTTPClient(cfg.URL, cfg.Headers)
+		if err != nil {
+			return nil, err
+		}
 		return &mcp.SSEClientTransport{
 			Endpoint:   cfg.URL,
-			HTTPClient: httpClientWithHeaders(cfg.Headers),
+			HTTPClient: client,
 		}, nil
 	default:
 		return nil, xerrors.Errorf("unsupported transport %q", cfg.Transport)

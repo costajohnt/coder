@@ -2,10 +2,14 @@ package agentmcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -430,4 +434,160 @@ func runFakeMCPServer() {
 		}
 		_, _ = fmt.Fprintf(os.Stdout, "%s\n", out)
 	}
+}
+
+func TestReload_ConnectFailureCarriesReason(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+	logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".mcp.json")
+	cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{
+		"missing": map[string]any{"type": "stdio", "command": "coder-test-missing-mcp-binary"},
+		"bogus":   map[string]any{"type": "bogus", "url": "https://example.com/mcp"},
+		"secret":  map[string]any{"type": "http", "url": "http://user:pa55word@127.0.0.1:1/s/SECRETPATH/mcp?api_key=SECRETQ"},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, cfg, 0o600))
+
+	m := NewManager(ctx, logger, agentexec.DefaultExecer, nil, nil, nil, nil)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Reload(ctx, []string{path}))
+
+	catalog := m.Catalog()
+	require.Len(t, catalog, 3)
+	byName := make(map[string]ServerStatus, len(catalog))
+	for _, st := range catalog {
+		byName[st.Name] = st
+	}
+	require.Contains(t, byName, "missing")
+	assert.False(t, byName["missing"].Connected)
+	assert.Contains(t, byName["missing"].Err, "connect: ")
+	assert.Contains(t, byName["missing"].Err, "coder-test-missing-mcp-binary")
+	require.Contains(t, byName, "bogus")
+	assert.False(t, byName["bogus"].Connected)
+	assert.Contains(t, byName["bogus"].Err, `create transport: unsupported transport "bogus"`)
+	require.Contains(t, byName, "secret")
+	assert.False(t, byName["secret"].Connected)
+	assert.Contains(t, byName["secret"].Err, "http://127.0.0.1:1")
+	for _, secret := range []string{"pa55word", "SECRETPATH", "SECRETQ"} {
+		assert.NotContains(t, byName["secret"].Err, secret)
+	}
+}
+
+func TestCreateTransport_HTTP(t *testing.T) {
+	t.Parallel()
+
+	ctx := testutil.Context(t, testutil.WaitShort)
+	m := NewManager(ctx, slogtest.Make(t, nil), agentexec.DefaultExecer, nil, nil, nil, nil)
+	t.Cleanup(func() { _ = m.Close() })
+
+	rec := &headerRecorder{}
+	srv := httptest.NewServer(rec)
+	t.Cleanup(srv.Close)
+	headers := map[string]string{"X-Mcp-Test": "configured"}
+
+	for _, tc := range []struct {
+		transport string
+		client    func(mcp.Transport) *http.Client
+	}{
+		{"http", func(tr mcp.Transport) *http.Client { return tr.(*mcp.StreamableClientTransport).HTTPClient }},
+		{"sse", func(tr mcp.Transport) *http.Client { return tr.(*mcp.SSEClientTransport).HTTPClient }},
+	} {
+		path := "/" + tc.transport
+		tr, err := m.createTransport(ctx, ServerConfig{Name: "srv", Transport: tc.transport, URL: srv.URL + path, Headers: headers})
+		require.NoError(t, err, tc.transport)
+		client := tc.client(tr)
+		require.NotNil(t, client, tc.transport)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+path, nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err, tc.transport)
+		_ = resp.Body.Close()
+		seen := rec.requests(path)
+		require.Len(t, seen, 1, tc.transport)
+		assert.Equal(t, "configured", seen[0].Get("X-Mcp-Test"), tc.transport)
+
+		_, err = m.createTransport(ctx, ServerConfig{Name: "srv", Transport: tc.transport, URL: "http://[::1/mcp"})
+		assert.ErrorContains(t, err, "invalid server url", tc.transport)
+	}
+}
+
+func reloadOne(ctx context.Context, t *testing.T, entry map[string]any) ServerStatus {
+	t.Helper()
+	logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug)
+	path := filepath.Join(t.TempDir(), ".mcp.json")
+	cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"srv": entry}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, cfg, 0o600))
+
+	m := NewManager(ctx, logger, agentexec.DefaultExecer, nil, nil, nil, nil)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Reload(ctx, []string{path}))
+	catalog := m.Catalog()
+	require.Len(t, catalog, 1)
+	return catalog[0]
+}
+
+func TestReload_ListToolsFailureRedactsURL(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	}, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if bytes.Contains(body, []byte(`"tools/list"`)) {
+			// Drop the connection so the client error carries the URL.
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		mcpHandler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	st := reloadOne(ctx, t, map[string]any{"type": "http", "url": srv.URL + "/s/SECRETPATH/mcp?api_key=SECRETQ"})
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Err, srv.URL)
+	assert.NotContains(t, st.Err, "SECRETPATH")
+	assert.NotContains(t, st.Err, "SECRETQ")
+}
+
+func TestReload_SSEEndpointOffOriginWithHeaders(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	otherRec := &headerRecorder{}
+	otherSrv := httptest.NewServer(otherRec)
+	t.Cleanup(otherSrv.Close)
+	// The refused POST closes the stream, so Connect can also see the
+	// read side's EOF.
+	originSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s/msg?session=1\n\n", otherSrv.URL)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(originSrv.Close)
+
+	st := reloadOne(ctx, t, map[string]any{
+		"type":    "sse",
+		"url":     originSrv.URL + "/sse",
+		"headers": map[string]string{"Authorization": "Bearer secret"},
+	})
+	assert.False(t, st.Connected)
+	assert.Contains(t, st.Err, "configured headers are pinned to")
+	assert.Empty(t, otherRec.requests("/msg"))
 }
