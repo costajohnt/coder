@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +20,8 @@ import (
 	agentproto "github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/codersdk/workspacesdk"
 	"github.com/coder/quartz"
 )
 
@@ -75,6 +79,10 @@ type ContextAPI struct {
 	// deployment-wide kill switch for context sync write load
 	// (CODER_DISABLE_WORKSPACE_AGENT_CONTEXT_SYNC).
 	Disabled bool
+	// Experiments gates Agent Plugins data. With agent-plugins disabled,
+	// plugin resources and resources with a plugin_name are dropped
+	// before storing; the aggregate hash is stored as sent.
+	Experiments codersdk.Experiments
 }
 
 // ContextDirtyMarker hydrates chats from, and marks chats dirty against, a
@@ -126,7 +134,11 @@ func (a *ContextAPI) PushContextState(ctx context.Context, req *agentproto.PushC
 		return nil, err
 	}
 
-	rows, err := validateAndConvertContextResources(req.Resources)
+	resources := req.Resources
+	if !a.Experiments.Enabled(codersdk.ExperimentAgentPlugins) {
+		resources = withoutPluginData(resources)
+	}
+	rows, err := validateAndConvertContextResources(resources)
 	if err != nil {
 		return nil, err
 	}
@@ -277,8 +289,14 @@ func validateContextPushRequest(req *agentproto.PushContextStateRequest) error {
 //
 //   - empty, oversized, or duplicate sources (the PK depends on
 //     uniqueness and indexes the source column),
-//   - unknown body variants (kept extensible by emitting the proto's
-//     reserved kinds via dedicated body messages),
+//   - unknown body variants,
+//   - plugin names that fail workspacesdk.ValidatePluginName, OK plugin
+//     resources without a name or with a name another OK plugin
+//     resource already uses, skills and MCP servers whose plugin_name
+//     names no OK plugin resource in the push, plugin skill sources
+//     outside "<plugin source>/skills/", and plugin MCP server sources
+//     other than "<plugin_name>/<server_name>" or with an empty
+//     server_name,
 //   - unknown status enum values,
 //   - per-resource and aggregate body sizes past the server caps.
 //
@@ -289,6 +307,20 @@ func validateContextPushRequest(req *agentproto.PushContextStateRequest) error {
 // WorkspaceAgentID and Now are left unset; the caller fills them at
 // upsert time.
 func validateAndConvertContextResources(resources []*agentproto.ContextResource) ([]database.UpsertWorkspaceAgentContextResourceParams, error) {
+	// The first pass records the first source per OK plugin name so a
+	// skill or server may precede its plugin; duplicates are reported
+	// in the second pass, after the source checks.
+	okPluginSources := make(map[string]string)
+	for _, r := range resources {
+		plugin := r.GetPlugin()
+		if plugin == nil || r.Status != agentproto.ContextResource_OK || plugin.GetName() == "" {
+			continue
+		}
+		if _, ok := okPluginSources[plugin.GetName()]; !ok {
+			okPluginSources[plugin.GetName()] = r.Source
+		}
+	}
+
 	rows := make([]database.UpsertWorkspaceAgentContextResourceParams, 0, len(resources))
 	seen := make(map[string]struct{}, len(resources))
 	aggregateBodyBytes := 0
@@ -306,6 +338,11 @@ func validateAndConvertContextResources(resources []*agentproto.ContextResource)
 			return nil, xerrors.Errorf("agentapi: PushContextState duplicate source %q", r.Source)
 		}
 		seen[r.Source] = struct{}{}
+		if plugin := r.GetPlugin(); plugin != nil && r.Status == agentproto.ContextResource_OK && plugin.GetName() != "" {
+			if first := okPluginSources[plugin.GetName()]; first != r.Source {
+				return nil, xerrors.Errorf("resource %q: ok plugin name %q is already used by %q", r.Source, plugin.GetName(), first)
+			}
+		}
 
 		if len(r.GetSourcePath()) > maxContextSourceBytes {
 			return nil, xerrors.Errorf("resource %q: source path is %d bytes, exceeds %d byte cap", r.Source, len(r.GetSourcePath()), maxContextSourceBytes)
@@ -320,6 +357,9 @@ func validateAndConvertContextResources(resources []*agentproto.ContextResource)
 			return nil, xerrors.Errorf("resource %q: size %d exceeds int64 range", r.Source, r.SizeBytes)
 		}
 
+		if err := validateContextPluginFields(r, okPluginSources); err != nil {
+			return nil, xerrors.Errorf("resource %q: %w", r.Source, err)
+		}
 		kind, body, err := marshalContextResourceBody(r)
 		if err != nil {
 			return nil, xerrors.Errorf("resource %q: %w", r.Source, err)
@@ -350,6 +390,84 @@ func validateAndConvertContextResources(resources []*agentproto.ContextResource)
 		})
 	}
 	return rows, nil
+}
+
+// contextPluginName returns the plugin name carried by r: the manifest
+// name for a plugin resource, or plugin_name for a skill or MCP server.
+func contextPluginName(r *agentproto.ContextResource) string {
+	switch b := r.Body.(type) {
+	case *agentproto.ContextResource_Plugin:
+		return b.Plugin.GetName()
+	case *agentproto.ContextResource_Skill:
+		return b.Skill.GetPluginName()
+	case *agentproto.ContextResource_McpServer:
+		return b.McpServer.GetPluginName()
+	default:
+		return ""
+	}
+}
+
+// validateContextPluginFields checks the Agent Plugins fields of r
+// against okPluginSources, which maps each OK plugin name in the push
+// to its plugin resource's source:
+//
+//   - a non-empty plugin name must pass workspacesdk.ValidatePluginName,
+//   - an OK plugin resource must carry a name; a non-OK one may omit it,
+//   - a skill or MCP server plugin_name must name an OK plugin,
+//   - a plugin skill's source must be under "<plugin source>/skills/",
+//     with either path separator,
+//   - a plugin MCP server's server_name must be non-empty and its
+//     source must be "<plugin_name>/<server_name>".
+//
+// The skills/ check is a string prefix, not path containment.
+func validateContextPluginFields(r *agentproto.ContextResource, okPluginSources map[string]string) error {
+	name := contextPluginName(r)
+	if name == "" {
+		if _, ok := r.Body.(*agentproto.ContextResource_Plugin); ok && r.Status == agentproto.ContextResource_OK {
+			return xerrors.New("plugin name is required on an ok plugin resource")
+		}
+		return nil
+	}
+	if err := workspacesdk.ValidatePluginName(name); err != nil {
+		return err
+	}
+	if r.GetPlugin() != nil {
+		return nil
+	}
+	pluginSource, ok := okPluginSources[name]
+	if !ok {
+		return xerrors.Errorf("plugin_name %q names no ok plugin resource in the push", name)
+	}
+	if r.GetSkill() != nil {
+		source := strings.ReplaceAll(r.Source, `\`, "/")
+		prefix := strings.ReplaceAll(pluginSource, `\`, "/") + "/skills/"
+		if !strings.HasPrefix(source, prefix) {
+			return xerrors.Errorf("plugin skill source must be under %q", pluginSource+"/skills/")
+		}
+	}
+	if server := r.GetMcpServer(); server != nil {
+		if server.GetServerName() == "" {
+			return xerrors.New("plugin MCP server_name is required")
+		}
+		if want := name + "/" + server.GetServerName(); r.Source != want {
+			return xerrors.Errorf("plugin MCP server source must be %q", want)
+		}
+	}
+	return nil
+}
+
+// withoutPluginData returns resources without plugin resources and
+// without resources that carry a plugin name. It does not modify the
+// input slice.
+func withoutPluginData(resources []*agentproto.ContextResource) []*agentproto.ContextResource {
+	isPluginData := func(r *agentproto.ContextResource) bool {
+		if r == nil {
+			return false
+		}
+		_, ok := r.Body.(*agentproto.ContextResource_Plugin)
+		return ok || contextPluginName(r) != ""
+	}
+	return slices.DeleteFunc(slices.Clone(resources), isPluginData)
 }
 
 // marshalContextResourceBody picks the body variant set on the wire
@@ -393,6 +511,13 @@ func marshalContextResourceBody(r *agentproto.ContextResource) (kind database.Wo
 		}
 		body, err = marshalBody(payload)
 		return database.WorkspaceAgentContextBodyKindMcpServer, body, err
+	case *agentproto.ContextResource_Plugin:
+		payload := b.Plugin
+		if payload == nil {
+			payload = &agentproto.PluginBody{}
+		}
+		body, err = marshalBody(payload)
+		return database.WorkspaceAgentContextBodyKindPlugin, body, err
 	case nil:
 		return "", nil, xerrors.Errorf("missing body variant; status %s requires a typed body", r.Status)
 	default:
