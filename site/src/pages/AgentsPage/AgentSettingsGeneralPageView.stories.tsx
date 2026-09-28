@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, spyOn, userEvent, waitFor, within } from "storybook/test";
 import { API } from "#/api/api";
+import { preferenceSettingsKey } from "#/api/queries/users";
 import type { AgentChatSendShortcut } from "#/api/typesGenerated";
 import {
 	AgentSettingsGeneralPageView,
@@ -157,7 +158,7 @@ export const CollapseAssistantStepsEnabled: Story = {
 	parameters: {
 		queries: [
 			{
-				key: ["me", "preferences"],
+				key: preferenceSettingsKey,
 				data: { ...preferencesData, collapse_assistant_steps: true },
 			},
 		],
