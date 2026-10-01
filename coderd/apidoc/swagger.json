@@ -17924,7 +17924,12 @@
 				"workspace_proxy:create",
 				"workspace_proxy:delete",
 				"workspace_proxy:read",
-				"workspace_proxy:update"
+				"workspace_proxy:update",
+				"workspace_secret:*",
+				"workspace_secret:create",
+				"workspace_secret:read",
+				"workspace_secret:read_secret",
+				"workspace_secret:update"
 			],
 			"x-enum-varnames": [
 				"APIKeyScopeAll",
@@ -18185,7 +18190,12 @@
 				"APIKeyScopeWorkspaceProxyCreate",
 				"APIKeyScopeWorkspaceProxyDelete",
 				"APIKeyScopeWorkspaceProxyRead",
-				"APIKeyScopeWorkspaceProxyUpdate"
+				"APIKeyScopeWorkspaceProxyUpdate",
+				"APIKeyScopeWorkspaceSecretAll",
+				"APIKeyScopeWorkspaceSecretCreate",
+				"APIKeyScopeWorkspaceSecretRead",
+				"APIKeyScopeWorkspaceSecretReadSecret",
+				"APIKeyScopeWorkspaceSecretUpdate"
 			]
 		},
 		"codersdk.AddLicenseRequest": {
@@ -27126,6 +27136,7 @@
 				"delete_agent",
 				"read",
 				"read_personal",
+				"read_secret",
 				"ssh",
 				"share",
 				"unassign",
@@ -27146,6 +27157,7 @@
 				"ActionDeleteAgent",
 				"ActionRead",
 				"ActionReadPersonal",
+				"ActionReadSecret",
 				"ActionSSH",
 				"ActionShare",
 				"ActionUnassign",
@@ -27215,7 +27227,8 @@
 				"workspace_agent_resource_monitor",
 				"workspace_build_orchestration",
 				"workspace_dormant",
-				"workspace_proxy"
+				"workspace_proxy",
+				"workspace_secret"
 			],
 			"x-enum-varnames": [
 				"ResourceWildcard",
@@ -27272,7 +27285,8 @@
 				"ResourceWorkspaceAgentResourceMonitor",
 				"ResourceWorkspaceBuildOrchestration",
 				"ResourceWorkspaceDormant",
-				"ResourceWorkspaceProxy"
+				"ResourceWorkspaceProxy",
+				"ResourceWorkspaceSecret"
 			]
 		},
 		"codersdk.RateLimitConfig": {
