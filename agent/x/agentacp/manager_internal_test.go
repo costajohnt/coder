@@ -1,0 +1,357 @@
+package agentacp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/spf13/afero"
+	"github.com/stretchr/testify/require"
+
+	"cdr.dev/slog/v3/sloggers/slogtest"
+	acp "github.com/coder/acp-go-sdk"
+	"github.com/coder/quartz"
+
+	"github.com/coder/coder/v2/agent/agentexec"
+	"github.com/coder/coder/v2/agent/usershell"
+	"github.com/coder/coder/v2/codersdk/workspacesdk"
+	"github.com/coder/coder/v2/testutil"
+)
+
+type testEnv struct {
+	usershell.SystemEnvInfo
+	home string
+}
+
+func (e testEnv) HomeDir() (string, error) { return e.home, nil }
+
+func newTestManager(t *testing.T, mode string) (manager *Manager, directory, configsDirectory string) {
+	t.Helper()
+	home, dir := t.TempDir(), t.TempDir()
+	m := NewManager(context.Background(), Options{
+		Logger:     slogtest.Make(t, nil),
+		Clock:      quartz.NewMock(t),
+		Execer:     agentexec.DefaultExecer,
+		Filesystem: afero.NewOsFs(),
+		EnvInfo:    testEnv{home: home},
+		WorkingDir: func() string { return dir },
+	})
+	t.Cleanup(func() { require.NoError(t, m.Close()) })
+	configDir := filepath.Join(home, ".coder", "acp")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	writeConfig(t, filepath.Join(configDir, "fake.json"), map[string]any{"command": fakeCommand(t, mode)})
+	require.NoError(t, m.Reload(context.Background()))
+	require.Len(t, m.Catalog(), 1)
+	require.Empty(t, m.Catalog()[0].Error)
+	return m, dir, configDir
+}
+
+func writeConfig(t *testing.T, path string, value any) {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+}
+
+func createTestSession(t *testing.T, m *Manager, dir string) workspacesdk.ACPSession {
+	t.Helper()
+	info, err := m.Create(context.Background(), workspacesdk.ACPCreateSessionRequest{RequestID: uuid.New(), HarnessSlug: "fake", WorkingDirectory: dir, Config: map[string]string{"model": "other"}})
+	require.NoError(t, err)
+	require.Equal(t, "idle", info.Status)
+	return info
+}
+
+func TestSessionLifecycle(t *testing.T) {
+	t.Parallel()
+	m, dir, _ := newTestManager(t, "both")
+
+	info := createTestSession(t, m, dir)
+	ctx := testutil.Context(t, testutil.WaitLong)
+	message := workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hello"}
+	result, err := m.Message(ctx, info.ID, message)
+	require.NoError(t, err)
+	require.Equal(t, "prompt", result.Outcome)
+	duplicate, err := m.Message(ctx, info.ID, message)
+	require.NoError(t, err)
+	require.Equal(t, result, duplicate)
+	message.Text = "different"
+	_, err = m.Message(ctx, info.ID, message)
+	require.ErrorIs(t, err, ErrConflict)
+	wait, err := m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "answer:hello:other", wait.AssistantResponse)
+	require.Equal(t, "idle", wait.Session.Status)
+	require.Equal(t, "user_message", wait.Events[0].Kind)
+	require.Contains(t, string(wait.Events[2].Update), "thinking")
+	require.Equal(t, "status", wait.Events[len(wait.Events)-1].Kind)
+	require.Len(t, m.List(), 1)
+	baseline, events, unsubscribe, err := m.Subscribe(context.Background(), info.ID, &wait.Session.Cursor)
+	require.NoError(t, err)
+	defer unsubscribe()
+	require.Len(t, baseline, 1)
+	_, err = m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hold"})
+	require.NoError(t, err)
+	// A notification establishes that the harness is inside the active prompt.
+	for event := range events {
+		if string(event.Update) != "" && event.Kind == "update" && string(event.Update) != "null" {
+			break
+		}
+	}
+	for _, text := range []string{"steer", "new"} {
+		admission, err := m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: text})
+		require.NoError(t, err)
+		want := "injected"
+		if text == "new" {
+			want = "startedNewTurn"
+		}
+		require.Equal(t, want, admission.Outcome)
+	}
+	_, err = m.Interrupt(ctx, info.ID)
+	require.NoError(t, err)
+	wait, err = m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+	require.NoError(t, err)
+	require.Equal(t, string(acp.StopReasonCancelled), wait.Session.StopReason)
+	_, err = m.Interrupt(ctx, info.ID)
+	require.NoError(t, err)
+	require.NoError(t, m.Close())
+}
+
+func TestRequiredDirectoryAndOverrides(t *testing.T) {
+	t.Parallel()
+	m, dir, _ := newTestManager(t, "both")
+	file := filepath.Join(dir, "file")
+	require.NoError(t, os.WriteFile(file, nil, 0o600))
+	for _, directory := range []string{"", ".", "relative", filepath.Join(dir, "absent"), file} {
+		req := workspacesdk.ACPCreateSessionRequest{RequestID: uuid.New(), HarnessSlug: "fake", WorkingDirectory: directory}
+		_, err := m.Create(context.Background(), req)
+		require.ErrorIs(t, err, ErrInvalid)
+		_, err = m.Read(context.Background(), workspacesdk.ACPSessionID{HarnessSlug: req.HarnessSlug, WorkingDirectory: directory, SessionID: "native"}, nil)
+		require.ErrorIs(t, err, ErrInvalid)
+	}
+	_, err := m.Create(context.Background(), workspacesdk.ACPCreateSessionRequest{RequestID: uuid.New(), HarnessSlug: "fake", WorkingDirectory: dir, Config: map[string]string{"model": "unknown"}})
+	require.ErrorIs(t, err, ErrInvalid)
+	info := createTestSession(t, m, dir)
+	require.NotEmpty(t, info.ID.SessionID)
+}
+
+func TestPermissionsAndCallbacks(t *testing.T) {
+	t.Parallel()
+	c := &client{}
+	for _, test := range []struct {
+		options  []acp.PermissionOption
+		canceled bool
+		want     string
+	}{
+		{options: []acp.PermissionOption{{OptionId: "once", Kind: acp.PermissionOptionKindAllowOnce}, {OptionId: "always", Kind: acp.PermissionOptionKindAllowAlways}}, want: "always"},
+		{options: []acp.PermissionOption{{OptionId: "once", Kind: acp.PermissionOptionKindAllowOnce}}, want: "once"},
+		{options: []acp.PermissionOption{{OptionId: "deny", Kind: acp.PermissionOptionKindRejectAlways}}},
+		{options: []acp.PermissionOption{{OptionId: "always", Kind: acp.PermissionOptionKindAllowAlways}}, canceled: true},
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if test.canceled {
+			cancel()
+		}
+		result, err := c.RequestPermission(ctx, acp.RequestPermissionRequest{Options: test.options})
+		cancel()
+		require.NoError(t, err)
+		if test.want == "" {
+			require.NotNil(t, result.Outcome.Cancelled) //nolint:misspell // ACP uses this spelling.
+		} else {
+			require.Equal(t, test.want, string(result.Outcome.Selected.OptionId))
+		}
+	}
+	_, err := c.ReadTextFile(context.Background(), acp.ReadTextFileRequest{})
+	require.Error(t, err)
+	_, err = c.WriteTextFile(context.Background(), acp.WriteTextFileRequest{})
+	require.Error(t, err)
+	_, err = c.CreateTerminal(context.Background(), acp.CreateTerminalRequest{})
+	require.Error(t, err)
+	_, err = c.KillTerminal(context.Background(), acp.KillTerminalRequest{})
+	require.Error(t, err)
+	_, err = c.TerminalOutput(context.Background(), acp.TerminalOutputRequest{})
+	require.Error(t, err)
+	_, err = c.ReleaseTerminal(context.Background(), acp.ReleaseTerminalRequest{})
+	require.Error(t, err)
+	_, err = c.WaitForTerminalExit(context.Background(), acp.WaitForTerminalExitRequest{})
+	require.Error(t, err)
+}
+
+func TestWaitTimeoutAndSlowSubscriber(t *testing.T) {
+	t.Parallel()
+	m, dir, _ := newTestManager(t, "both")
+
+	info := createTestSession(t, m, dir)
+	ctx := testutil.Context(t, testutil.WaitLong)
+	_, err := m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hold"})
+	require.NoError(t, err)
+	mock := m.clock.(*quartz.Mock)
+	trap := mock.Trap().NewTimer("acp-wait")
+	defer func() {
+		if trap != nil {
+			trap.Close()
+		}
+	}()
+	done := make(chan workspacesdk.ACPSessionResponse, 1)
+	go func() {
+		result, e := m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{Timeout: time.Second})
+		if e != nil {
+			return
+		}
+		done <- result
+	}()
+	call := trap.MustWait(ctx)
+	call.MustRelease(ctx)
+	trap.Close()
+	trap = nil
+	mock.Advance(time.Second).MustWait(ctx)
+	select {
+	case result := <-done:
+		require.True(t, result.TimedOut)
+		require.Equal(t, "running", result.Session.Status)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = m.Wait(canceled, info.ID, workspacesdk.ACPWaitOptions{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, events, unsubscribe, err := m.Subscribe(context.Background(), info.ID, nil)
+	require.NoError(t, err)
+	defer unsubscribe()
+	s, err := m.get(ctx, info.ID)
+	require.NoError(t, err)
+	s.mu.Lock()
+	for range 100 {
+		s.appendLocked("update", "", nil)
+	}
+	s.mu.Unlock()
+	count := 0
+	for range events {
+		count++
+	}
+	require.Equal(t, 64, count)
+	read, err := m.Read(context.Background(), info.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, "running", read.Session.Status)
+	require.NoError(t, m.Close())
+}
+
+func TestConcurrentSessionsAndProcessFailure(t *testing.T) {
+	t.Parallel()
+	m, dir, _ := newTestManager(t, "none")
+
+	ctx := testutil.Context(t, testutil.WaitLong)
+	type outcome struct {
+		response workspacesdk.ACPSessionResponse
+		err      error
+	}
+	outcomes := make(chan outcome, 3)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			info, err := m.Create(ctx, workspacesdk.ACPCreateSessionRequest{RequestID: uuid.New(), HarnessSlug: "fake", WorkingDirectory: dir, Config: map[string]string{"model": "other"}})
+			if err == nil {
+				_, err = m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hello"})
+			}
+			var result workspacesdk.ACPSessionResponse
+			if err == nil {
+				result, err = m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+			}
+			outcomes <- outcome{response: result, err: err}
+		}()
+	}
+	wg.Wait()
+	close(outcomes)
+	for result := range outcomes {
+		require.NoError(t, result.err)
+		require.Equal(t, "answer:hello:other", result.response.AssistantResponse)
+	}
+	info := createTestSession(t, m, dir)
+	_, err := m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hold"})
+	require.NoError(t, err)
+	_, err = m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "steer"})
+	require.ErrorIs(t, err, ErrConflict)
+	_, err = m.Interrupt(ctx, info.ID)
+	require.NoError(t, err)
+	_, err = m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+	require.NoError(t, err)
+	_, err = m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "exit"})
+	require.NoError(t, err)
+	result, err := m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "error", result.Session.Status)
+	require.NotEmpty(t, result.Session.Error)
+	require.False(t, errors.Is(err, ErrInvalid))
+}
+
+func TestAcceptedWorkAndShutdown(t *testing.T) {
+	t.Parallel()
+	m, dir, _ := newTestManager(t, "both")
+
+	// Canceling the caller cannot cancel accepted setup or prompts.
+	req := workspacesdk.ACPCreateSessionRequest{RequestID: uuid.New(), HarnessSlug: "fake", WorkingDirectory: dir}
+	caller, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := m.Create(caller, req)
+	require.ErrorIs(t, err, context.Canceled)
+	ctx := testutil.Context(t, testutil.WaitLong)
+	info, err := m.Create(ctx, req)
+	require.NoError(t, err)
+	caller, cancel = context.WithCancel(ctx)
+	_, err = m.Message(caller, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hello"})
+	require.NoError(t, err)
+	cancel()
+	result, err := m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "answer:hello:default", result.AssistantResponse)
+	s, err := m.get(ctx, info.ID)
+	require.NoError(t, err)
+	s.mu.Lock()
+	p := s.proc
+	s.mu.Unlock()
+	require.NoError(t, m.Close())
+	select {
+	case <-p.done:
+	default:
+		t.Fatal("harness was not reaped")
+	}
+	require.NoError(t, m.Close())
+}
+
+func TestReadConcurrentWithShutdown(t *testing.T) {
+	t.Parallel()
+	m, dir, _ := newTestManager(t, "both")
+
+	ctx := testutil.Context(t, testutil.WaitLong)
+	info := createTestSession(t, m, dir)
+	_, err := m.Message(ctx, info.ID, workspacesdk.ACPMessageRequest{ID: uuid.New(), Text: "hello"})
+	require.NoError(t, err)
+	before, err := m.Wait(ctx, info.ID, workspacesdk.ACPWaitOptions{})
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	errorsCh := make(chan error, 10)
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, readErr := m.Read(context.Background(), info.ID, &before.Session.Cursor)
+			errorsCh <- readErr
+		}()
+	}
+	require.NoError(t, m.Close())
+	wg.Wait()
+	close(errorsCh)
+	for readErr := range errorsCh {
+		if readErr != nil {
+			require.True(t, errors.Is(readErr, ErrNotFound) || errors.Is(readErr, ErrUnavailable), "%v", readErr)
+		}
+	}
+}

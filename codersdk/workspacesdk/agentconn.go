@@ -91,6 +91,14 @@ const (
 // AgentConn represents a connection to a workspace agent.
 // @typescript-ignore AgentConn
 type AgentConn interface {
+	ListACPHarnesses(ctx context.Context) ([]ACPHarness, error)
+	CreateACPSession(ctx context.Context, req ACPCreateSessionRequest) (ACPSession, error)
+	ListACPSessions(ctx context.Context) ([]ACPSession, error)
+	ReadACPSession(ctx context.Context, id ACPSessionID, opts ACPReadOptions) (ACPSessionResponse, error)
+	SendACPMessage(ctx context.Context, id ACPSessionID, req ACPMessageRequest) (ACPMessageResponse, error)
+	InterruptACPSession(ctx context.Context, id ACPSessionID) (ACPSession, error)
+	WaitACPSession(ctx context.Context, id ACPSessionID, opts ACPWaitOptions) (ACPSessionResponse, error)
+	WatchACPSession(ctx context.Context, logger slog.Logger, id ACPSessionID, opts ACPReadOptions) (<-chan ACPEvent, io.Closer, error)
 	TailnetConn() *tailnet.Conn
 	SetExtraHeaders(h http.Header)
 
