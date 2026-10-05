@@ -3681,30 +3681,12 @@ type systemPromptBehaviorContext struct {
 	isRootChat           bool
 }
 
-func workspaceSkillsForResolution(workspaceSkills []chattool.SkillMeta) []skillspkg.Skill {
-	if len(workspaceSkills) == 0 {
-		return nil
-	}
-	resolved := make([]skillspkg.Skill, 0, len(workspaceSkills))
-	for _, skill := range workspaceSkills {
-		resolved = append(resolved, skillspkg.Skill{
-			Name:        skill.Name,
-			Description: skill.Description,
-			Source:      skillspkg.SourceWorkspace,
-		})
-	}
-	return resolved
-}
-
 func mergeTurnSkills(
 	personalSkills []skillspkg.Skill,
-	workspaceSkills []chattool.SkillMeta,
+	pinnedSkills []chattool.SkillMeta,
 ) []skillspkg.ResolvedSkill {
-	return skillspkg.MergeSkills(
-		personalSkills,
-		workspaceSkillsForResolution(workspaceSkills),
-		nil,
-	)
+	workspace, plugin := chattool.SplitPinnedSkills(pinnedSkills)
+	return skillspkg.MergeSkills(personalSkills, workspace, plugin)
 }
 
 // buildSystemPrompt applies system-level prompt injections in a fixed

@@ -21201,6 +21201,10 @@ const docTemplate = `{
                 "kind": {
                     "$ref": "#/definitions/codersdk.ChatContextResourceKind"
                 },
+                "plugin_name": {
+                    "description": "PluginName is the owning Agent Plugin's name. It is the manifest name\non OK plugin rows (empty when the manifest was rejected) and the\nattributing plugin on skill and mcp_server rows shipped inside a\nplugin, in every status; empty otherwise.",
+                    "type": "string"
+                },
                 "size_bytes": {
                     "description": "SizeBytes is the original payload size in bytes.",
                     "type": "integer"
@@ -21213,11 +21217,11 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "source": {
-                    "description": "Source is the resource locator: the canonical file path for an\ninstruction file, the skill directory for a skill, the file path for\nan MCP config, or the server name for an MCP server.",
+                    "description": "Source is the resource locator: the canonical file path for an\ninstruction file, the skill directory for a skill, the file path for\nan MCP config, the server name for an MCP server\n(\"\u003cplugin_name\u003e/\u003cserver_name\u003e\" for a plugin's server), or the plugin\nroot directory for a plugin.",
                     "type": "string"
                 },
                 "status": {
-                    "description": "Status is the resource's health. Non-ok resources (invalid, unreadable,\noversize, excluded) are still reported so the UI can surface why a\nresource was dropped from the prompt instead of silently omitting it;\ntheir body-specific fields (skill name, tools) are empty.",
+                    "description": "Status is the resource's health. Non-ok resources (invalid, unreadable,\noversize, excluded) are still reported so the UI can surface why a\nresource was dropped from the prompt instead of silently omitting it;\ntheir body-specific fields (skill name, tools) are empty, but\nplugin_name is still set on skill and mcp_server rows shipped by a\nplugin.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/codersdk.ChatContextResourceStatus"
@@ -21239,13 +21243,15 @@ const docTemplate = `{
                 "instruction_file",
                 "skill",
                 "mcp_config",
-                "mcp_server"
+                "mcp_server",
+                "plugin"
             ],
             "x-enum-varnames": [
                 "ChatContextResourceKindInstructionFile",
                 "ChatContextResourceKindSkill",
                 "ChatContextResourceKindMCPConfig",
-                "ChatContextResourceKindMCPServer"
+                "ChatContextResourceKindMCPServer",
+                "ChatContextResourceKindPlugin"
             ]
         },
         "codersdk.ChatContextResourceStatus": {
