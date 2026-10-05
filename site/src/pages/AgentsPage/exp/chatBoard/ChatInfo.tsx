@@ -125,8 +125,7 @@ const ChatInfoBody: React.FC<ChatInfoBodyProps> = ({ chat }) => {
 	if (costQuery.data) cost = formatCostMicros(costQuery.data.total_cost_micros);
 	else if (costQuery.isError) cost = "unavailable";
 	const unpricedRequests = costQuery.data?.unpriced_request_count ?? 0;
-	// The server lists the primary ref first.
-	const pr = (detail ?? chat).diff_statuses?.[0];
+	const pr = (detail ?? chat).diff_status;
 
 	return (
 		<div className="max-h-[60vh] overflow-y-auto px-3.5 py-3 text-[12.5px] leading-[1.45] text-content-primary">
