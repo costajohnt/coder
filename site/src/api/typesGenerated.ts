@@ -11807,6 +11807,11 @@ export interface UserSecret {
 	readonly updated_at: string;
 	readonly source: WorkspaceSecretSource;
 	/**
+	 * Ephemeral build secrets are delivered to their build only and not
+	 * copied to the next one. User secrets are never ephemeral.
+	 */
+	readonly ephemeral: boolean;
+	/**
 	 * EnvReplacedBy is the ID of the secret delivered on this secret's
 	 * env_name instead of it. Only set when listing secrets for a
 	 * workspace build.
@@ -12864,6 +12869,11 @@ export interface WorkspaceSecret {
 	readonly created_at: string;
 	readonly updated_at: string;
 	readonly source: WorkspaceSecretSource;
+	/**
+	 * Ephemeral build secrets are delivered to their build only and not
+	 * copied to the next one. User secrets are never ephemeral.
+	 */
+	readonly ephemeral: boolean;
 	/**
 	 * EnvReplacedBy is the ID of the secret delivered on this secret's
 	 * env_name instead of it. Only set when listing secrets for a
