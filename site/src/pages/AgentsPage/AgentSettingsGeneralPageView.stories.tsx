@@ -188,6 +188,7 @@ export const CollapseAssistantStepsSaveError: Story = {
 	},
 	play: async ({ canvasElement }) => {
 		const canvas = within(canvasElement);
+
 		await userEvent.click(
 			await canvas.findByRole("switch", { name: "Collapse assistant steps" }),
 		);
