@@ -597,6 +597,7 @@ export const MockUserSecrets: TypesGen.UserSecret[] = [
 		enabled: true,
 		created_at: "2026-04-28T16:30:00Z",
 		updated_at: "2026-04-30T16:30:00Z",
+		source: "user",
 	},
 	{
 		id: "secret-file-only",
@@ -607,6 +608,7 @@ export const MockUserSecrets: TypesGen.UserSecret[] = [
 		enabled: true,
 		created_at: "2026-04-29T16:30:00Z",
 		updated_at: "2026-05-01T16:30:00Z",
+		source: "user",
 	},
 	{
 		id: "secret-env-and-file",
@@ -617,6 +619,7 @@ export const MockUserSecrets: TypesGen.UserSecret[] = [
 		enabled: true,
 		created_at: "2026-04-30T16:30:00Z",
 		updated_at: "2026-05-02T16:30:00Z",
+		source: "user",
 	},
 	{
 		// Mirrors a pre-migration secret that had both env_name and
@@ -630,6 +633,7 @@ export const MockUserSecrets: TypesGen.UserSecret[] = [
 		enabled: false,
 		created_at: "2026-05-01T16:30:00Z",
 		updated_at: "2026-05-03T16:30:00Z",
+		source: "user",
 	},
 	{
 		id: "secret-duplicate",
@@ -640,6 +644,7 @@ export const MockUserSecrets: TypesGen.UserSecret[] = [
 		enabled: true,
 		created_at: "2026-05-01T18:30:00Z",
 		updated_at: "2026-05-03T18:30:00Z",
+		source: "user",
 	},
 ];
 
@@ -653,6 +658,7 @@ export const MockDisabledFileOnlyUserSecret: TypesGen.UserSecret = {
 	enabled: false,
 	created_at: "2026-04-27T16:30:00Z",
 	updated_at: "2026-05-03T20:30:00Z",
+	source: "user",
 };
 
 export const MockImportedUserSecret: TypesGen.UserSecret = {
@@ -664,6 +670,7 @@ export const MockImportedUserSecret: TypesGen.UserSecret = {
 	enabled: true,
 	created_at: "2026-05-04T00:00:00Z",
 	updated_at: "2026-05-04T00:00:00Z",
+	source: "user",
 };
 
 export const MockImportedUserSecrets: TypesGen.UserSecret[] = [

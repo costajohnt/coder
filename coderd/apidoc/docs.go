@@ -14539,6 +14539,7 @@ const docTemplate = `{
         },
         "/api/v2/users/{user}/secrets": {
             "get": {
+                "description": "With workspace_build set, the response also includes that\nbuild's workspace secrets, and reports which secrets are\nreplaced on their env_name or file_path by another secret.",
                 "produces": [
                     "application/json"
                 ],
@@ -14554,6 +14555,13 @@ const docTemplate = `{
                         "name": "user",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Workspace build ID owned by the user",
+                        "name": "workspace_build",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -14562,7 +14570,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/codersdk.UserSecret"
+                                "$ref": "#/definitions/codersdk.WorkspaceSecret"
                             }
                         }
                     }
@@ -14607,7 +14615,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/codersdk.UserSecret"
+                            "$ref": "#/definitions/codersdk.WorkspaceSecret"
                         }
                     },
                     "400": {
@@ -14667,7 +14675,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/codersdk.UserSecret"
+                                "$ref": "#/definitions/codersdk.WorkspaceSecret"
                             }
                         }
                     },
@@ -14727,7 +14735,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/codersdk.UserSecret"
+                            "$ref": "#/definitions/codersdk.WorkspaceSecret"
                         }
                     }
                 },
@@ -14811,7 +14819,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/codersdk.UserSecret"
+                            "$ref": "#/definitions/codersdk.WorkspaceSecret"
                         }
                     },
                     "400": {
@@ -33171,39 +33179,6 @@ const docTemplate = `{
                 }
             }
         },
-        "codersdk.UserSecret": {
-            "type": "object",
-            "properties": {
-                "created_at": {
-                    "type": "string",
-                    "format": "date-time"
-                },
-                "description": {
-                    "type": "string"
-                },
-                "enabled": {
-                    "description": "Enabled controls whether the secret is injected into workspaces.\nDisabled secrets remain visible and editable, but are not added\nto the agent manifest, so they are not exposed as environment\nvariables or written to secret files.",
-                    "type": "boolean"
-                },
-                "env_name": {
-                    "type": "string"
-                },
-                "file_path": {
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string",
-                    "format": "uuid"
-                },
-                "name": {
-                    "type": "string"
-                },
-                "updated_at": {
-                    "type": "string",
-                    "format": "date-time"
-                }
-            }
-        },
         "codersdk.UserSecretsCapabilities": {
             "type": "object",
             "properties": {
@@ -34856,6 +34831,60 @@ const docTemplate = `{
                 "WorkspaceRoleDeleted"
             ]
         },
+        "codersdk.WorkspaceSecret": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "description": "Enabled controls whether the secret is injected into workspaces.\nDisabled secrets remain visible and editable, but are not added\nto the agent manifest, so they are not exposed as environment\nvariables or written to secret files.",
+                    "type": "boolean"
+                },
+                "env_name": {
+                    "type": "string"
+                },
+                "env_replaced_by": {
+                    "description": "EnvReplacedBy is the ID of the secret delivered on this secret's\nenv_name instead of it. Only set when listing secrets for a\nworkspace build.",
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "file_path": {
+                    "type": "string"
+                },
+                "file_replaced_by": {
+                    "description": "FileReplacedBy is the ID of the secret delivered on this secret's\nfile_path instead of it. Only set when listing secrets for a\nworkspace build.",
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "id": {
+                    "type": "string",
+                    "format": "uuid"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "source": {
+                    "enum": [
+                        "user",
+                        "build"
+                    ],
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/codersdk.WorkspaceSecretSource"
+                        }
+                    ]
+                },
+                "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                }
+            }
+        },
         "codersdk.WorkspaceSecretInput": {
             "type": "object",
             "properties": {
@@ -34879,6 +34908,17 @@ const docTemplate = `{
                     "type": "string"
                 }
             }
+        },
+        "codersdk.WorkspaceSecretSource": {
+            "type": "string",
+            "enum": [
+                "user",
+                "build"
+            ],
+            "x-enum-varnames": [
+                "WorkspaceSecretSourceUser",
+                "WorkspaceSecretSourceBuild"
+            ]
         },
         "codersdk.WorkspaceSharingSettings": {
             "type": "object",
