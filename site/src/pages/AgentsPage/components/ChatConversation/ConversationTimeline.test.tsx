@@ -39,6 +39,7 @@ function renderTimeline(initial: TimelineStage = {}) {
 		preferenceSettingsKey,
 		MockCollapsedStepsPreferences,
 	);
+
 	const renderStage = ({
 		messages = MockWorkingMessages,
 		pendingToolCallIDs,
@@ -68,6 +69,7 @@ function renderTimeline(initial: TimelineStage = {}) {
 			</MessageScroller.Provider>
 		</QueryClientProvider>
 	);
+
 	const { rerender } = renderComponent(renderStage(initial));
 	return {
 		rerenderStage: (stage: TimelineStage) => rerender(renderStage(stage)),
@@ -101,6 +103,7 @@ describe("ConversationTimeline working blocks", () => {
 			messages: MockWorkingMessages.slice(3),
 			hasMoreMessages: true,
 		});
+
 		await user.click(
 			screen.getByRole("button", {
 				name: "Worked for at least 8s (1 step or more)",
@@ -113,6 +116,7 @@ describe("ConversationTimeline working blocks", () => {
 			hasMoreMessages: true,
 		});
 		expect(copyCommand).toHaveFocus();
+
 		rerenderStage({ messages: MockWorkingMessages });
 		expect(copyCommand).toHaveFocus();
 	});
@@ -123,9 +127,11 @@ describe("ConversationTimeline working blocks", () => {
 			messages: MockLongTurnPageLoads[0],
 			hasMoreMessages: true,
 		});
+
 		await user.click(
 			screen.getByRole("button", { name: /Worked for at least/ }),
 		);
+
 		rerenderStage({
 			messages: MockLongTurnPageLoads[1],
 			hasMoreMessages: true,
@@ -150,6 +156,7 @@ describe("ConversationTimeline working blocks", () => {
 				chatStatus: "running",
 				liveStatus: idleLive,
 			});
+
 			await user.click(screen.getByRole("button", { name: "Working for 12s" }));
 			const copyCommand = focusCopyCommand(2);
 
@@ -173,6 +180,7 @@ describe("ConversationTimeline working blocks", () => {
 			chatStatus: "running",
 			liveStatus: idleLive,
 		});
+
 		await user.click(
 			screen.getByRole("button", { name: "Working for at least 12s" }),
 		);
@@ -203,6 +211,7 @@ describe("ConversationTimeline working blocks", () => {
 			chatStatus: "running",
 			...stream,
 		});
+
 		const summary = screen.getByRole("button", { name: /^Working/ });
 		await user.click(summary);
 		expect(summary).toHaveFocus();
@@ -225,6 +234,7 @@ describe("ConversationTimeline working blocks", () => {
 			chatStatus: "running",
 			...buildStreamRenderState(mockStep.content ?? []),
 		});
+
 		const summary = screen.getByRole("button", { name: /^Working/ });
 		await user.click(summary);
 
@@ -255,7 +265,9 @@ describe("ConversationTimeline working blocks", () => {
 			chatStatus: "running",
 			liveStatus: idleLive,
 		});
+
 		const { rerenderStage } = renderTimeline(stage([mockLiveStep]));
+
 		await user.click(
 			screen.getByRole("button", { name: "Working for at least 8s" }),
 		);
@@ -293,11 +305,13 @@ describe("ConversationTimeline live working blocks", () => {
 		const { rerenderStage } = renderTimeline(
 			streamingStage(MockWorkingMessages.slice(0, 1), "first", 1),
 		);
+
 		const summary = screen.getByRole("button", { name: "Working for 12s" });
 		await user.click(summary);
 
 		rerenderStage(streamingStage(MockWorkingMessages.slice(0, 3), "second", 5));
 		expect(summary).toHaveFocus();
+
 		const copyCommand = focusCopyCommand(2);
 
 		rerenderStage({
@@ -319,6 +333,7 @@ describe("ConversationTimeline live working blocks", () => {
 			streamTools: [],
 			liveStatus: { phase: "starting", hasAccumulatedOutput: false },
 		});
+
 		const summary = screen.getByRole("button", { name: "Working for 12s" });
 		summary.focus();
 
@@ -354,6 +369,7 @@ describe("ConversationTimeline live working blocks", () => {
 			chatStatus: "running",
 			liveStatus: idleLive,
 		});
+
 		await user.click(
 			screen.getByRole("button", { name: "Working for at least 12s" }),
 		);
